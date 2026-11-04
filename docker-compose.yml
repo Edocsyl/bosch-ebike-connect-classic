@@ -1,0 +1,19 @@
+services:
+  bosch-ebike-connect-classic:
+    build: .
+    container_name: bosch-ebike-connect-classic
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    ports:
+      - "127.0.0.1:8080:8080"   # TLS reverse proxy / Cloudflare Tunnel in front
+    volumes:
+      - ebike-data:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  ebike-data:
