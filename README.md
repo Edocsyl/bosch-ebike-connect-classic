@@ -26,7 +26,7 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       PUBLIC_URL: http://localhost:8080     # address your clients use (https://... when public)
-      # TRUST_PROXY: "1"                    # behind Cloudflare / a reverse proxy
+      # TRUST_PROXY: "xff"                  # behind a reverse proxy ("cloudflare" for a Cloudflare tunnel)
       # LOG_LEVEL: info                     # debug | info | warning | error
       # GATEWAY_SECRET: ...                 # optional: else generated into ./config/gateway.secret
     volumes:
@@ -35,6 +35,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 200
 ```
 
 **2. Start**
@@ -80,9 +82,29 @@ Everything is set in the `environment:` block of the compose file:
 |---|---|---|
 | `PUBLIC_URL` | `http://localhost:8080` | Address your clients use, no trailing slash. Use your https address when public. |
 | `GATEWAY_SECRET` | generated | ≥ 32 characters. If unset, one is generated on first start and kept in `./config/gateway.secret`. |
-| `TRUST_PROXY` | `0` | `"1"` behind Cloudflare or another trusted proxy (rate limits use the real client IP). |
+| `TRUST_PROXY` | off | `xff` (or `1`): behind a reverse proxy, the client IP is taken from `X-Forwarded-For`. `cloudflare`: from `CF-Connecting-IP`. Only enable it when the server is reachable **only** through that proxy, otherwise clients can forge their IP and skip the rate limits. |
+| `PROXY_HOPS` | `1` | `xff` mode: number of trusted proxies in front of the server. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error`; see "Logs" below. |
 | `ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call `/mcp` (browser-based clients only). |
+| `ALLOWED_REDIRECT_HOSTS` | empty | Comma list. If set, `https` redirect URIs of clients must use one of these hosts (e.g. `claude.ai,chatgpt.com`). Strongest protection against phishing via self-registered clients on a public server. |
+| `ALLOWED_REDIRECT_SCHEMES` | empty | Extra custom URL schemes clients may use (built in: `cursor`, `vscode`, `claude`, `windsurf`, `zed`, … and any reverse-DNS scheme like `com.example.app`). |
+| `ALLOW_INSECURE_HTTP` | off | `1` permits a plain `http://` `PUBLIC_URL` on a non-local address. Passwords would travel unencrypted: do not use on the internet. |
+
+**Limits** (all optional, whole numbers):
+
+| Variable | Default | Limits |
+|---|---|---|
+| `RATE_LOGIN_IP` | `10` | sign-in attempts per IP per 10 min |
+| `RATE_LOGIN_ACCOUNT` | `5` | *failed* sign-ins per e-mail per 10 min (successful ones do not count) |
+| `RATE_REGISTER_IP` | `20` | client registrations per IP per hour |
+| `RATE_TOKEN_IP` | `60` | token requests per IP per minute |
+| `RATE_MCP_USER` | `120` | MCP calls per user per minute |
+| `MAX_BODY_BYTES` | `16384` | request body size for `/oauth/*` |
+| `MAX_MCP_BODY_BYTES` | `1048576` | request body size for `/mcp` |
+| `MAX_CLIENTS` | `10000` | registered OAuth clients (unused ones are purged after 7 days) |
+| `MAX_PORTAL_RESPONSE_BYTES` | `10485760` | largest accepted reply from the Bosch portal |
+
+Rate limits live in memory of the one container; they reset on restart.
 
 **Logs:** `docker compose logs -f`. `LOG_LEVEL` decides how much is written:
 
@@ -107,7 +129,7 @@ setup set `GATEWAY_SECRET` yourself and keep it out of `./config`, so a copy of 
 version. What changed in each version: [Releases](../../releases).
 
 **Going public:** put TLS in front (for example `cloudflared tunnel --url http://localhost:8080`), set
-`PUBLIC_URL` to the https address and `TRUST_PROXY: "1"`. You then hold other people's Bosch sessions and ride
+`PUBLIC_URL` to the https address and `TRUST_PROXY` (`xff` or `cloudflare`); for a public server also set `ALLOWED_REDIRECT_HOSTS`. You then hold other people's Bosch sessions and ride
 data: provide a privacy notice (GDPR / Swiss DSG) and start with a trusted circle.
 
 ## Tools
@@ -163,7 +185,10 @@ Client ──POST /mcp + Bearer──▶ guard ─▶ MCP tools ─▶ ebike-con
 - Tools take no account parameter: the user comes from the validated token, so users cannot reach each other.
 - An expired Bosch session drops the tokens; the next call gets `401` and the client signs in again.
 - `/mcp` rejects foreign browser origins; sign-in, registration, token and MCP calls are rate limited.
-- The container runs as a non-root user with a read-only filesystem and no capabilities.
+- Sign-in page shows where your browser is sent afterwards and that the app name is unverified; custom URL
+  schemes are restricted, request bodies are size-capped, rate limits are bounded and configurable.
+- A replayed refresh token revokes all tokens of that client and account.
+- The container runs as a non-root user with a read-only filesystem, no capabilities, and memory / process limits.
 
 ## Known limitations
 
@@ -171,7 +196,9 @@ Client ──POST /mcp + Bearer──▶ guard ─▶ MCP tools ─▶ ebike-con
   scripted OAuth client and with Claude Code; not with Claude Desktop, Claude web or other vendors' clients.
 - Not verified with real data: `get_route_details`, `export_route_gpx`, non-empty `get_saved_places` and
   `get_licenses` (the test account has none). The expired-session path is tested with a fake Bosch only.
-- SQLite in one container: fine for a small group, not horizontally scalable.
+- SQLite and in-memory rate limits in one container: fine for a small group, not horizontally scalable.
+- Reviewed by an automated security review, not by an independent audit or penetration test. If you run it
+  publicly, you carry the responsibility for the sessions you store.
 
 ## Contributing, credits and license
 

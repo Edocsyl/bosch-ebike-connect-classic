@@ -126,17 +126,20 @@ def _page(title: str, body: str, lang: str = "en", head: str = "") -> str:
 
 
 def authorize_page(*, client_name: str, params: dict[str, str], csrf: str,
-                   error: str = "", email: str = "", lang: str = "en") -> str:
+                   error: str = "", email: str = "", lang: str = "en", redirect_to: str = "") -> str:
     t = T[lang]
     hidden = "".join(f"<input type=hidden name='{escape(k)}' value='{escape(v)}'>"
                      for k, v in params.items())
     err = f'<div class="err" role="alert">{escape(error)}</div>' if error else ""
     who = f'<span class="chip">{escape(client_name or t["app_default"])}</span>'
+    redirect_note = (f'<div class="note">After you sign in, your browser is sent to <b>{escape(redirect_to)}</b>. '
+                     'The application name above is chosen by the application itself and is not verified. '
+                     'Continue only if you started this connection yourself.</div>') if redirect_to else ""
     return _page(t["signin_title"], f"""
 <div class="logo">{_BIKE}</div>
 <h1>{t['h1']}</h1>
 <p class="center">{t['intro'].format(who=who)}</p>
-<ul class="can"><li>{t['can1']}</li><li>{t['can2']}</li><li>{t['can3']}</li><li>{t['can4']}</li></ul>
+{redirect_note}<ul class="can"><li>{t['can1']}</li><li>{t['can2']}</li><li>{t['can3']}</li><li>{t['can4']}</li></ul>
 <form method="post" action="">
 {hidden}<input type=hidden name=csrf value='{escape(csrf)}'>
 <label for=e>{t['email']}</label>

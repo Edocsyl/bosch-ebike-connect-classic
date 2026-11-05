@@ -20,7 +20,7 @@ from starlette.routing import Mount, Route
 from . import pages
 from .client import AuthRequired, EBikeError, login
 from .config import Config
-from .logutil import log, mask_email
+from .logutil import clean, log, mask_email
 from .ratelimit import RateLimiter
 from .store import Store, normalize_account_key
 from .tools import create_mcp, current_account
@@ -32,29 +32,48 @@ SEC_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action *; frame-ancestors 'none'",
 }
-BLOCKED_SCHEMES = {"javascript", "data", "file", "vbscript", "about", "blob"}
+BLOCKED_SCHEMES = {
+    "javascript", "data", "file", "vbscript", "about", "blob", "ftp", "ftps", "sftp", "ssh", "telnet",
+    "smb", "nfs", "ldap", "gopher", "mailto", "tel", "sms", "intent", "jar", "view-source", "chrome",
+    "chrome-extension", "search", "search-ms", "ws", "wss",
+}
+# Desktop / IDE clients that finish OAuth through their own URL scheme. Other custom schemes are
+# accepted only in reverse-DNS form (contains a dot, e.g. com.example.app) or when the operator
+# lists them in ALLOWED_REDIRECT_SCHEMES. OS protocol handlers (ms-*, search-ms, ...) never are.
+KNOWN_APP_SCHEMES = {"cursor", "vscode", "vscode-insiders", "vscodium", "windsurf", "claude", "zed",
+                     "raycast", "chatgpt"}
 LOOPBACK = {"localhost", "127.0.0.1", "[::1]", "::1"}
+MAX_URI_LEN = 2048
 
 
-def valid_redirect_uri(uri: str) -> bool:
+def valid_redirect_uri(uri: str, hosts: tuple[str, ...] = (), schemes: tuple[str, ...] = ()) -> bool:
+    if len(uri) > MAX_URI_LEN or any(not c.isprintable() for c in uri):
+        return False
     try:
         u = urlsplit(uri)
     except ValueError:
         return False
-    if not u.scheme or u.scheme in BLOCKED_SCHEMES or u.fragment:
+    scheme = u.scheme.lower()
+    if not scheme or scheme in BLOCKED_SCHEMES or scheme.startswith("ms-") or u.fragment:
         return False
-    if u.scheme == "http":
+    if scheme == "http":
         return (u.hostname or "") in LOOPBACK
-    if u.scheme == "https":
-        return bool(u.hostname)
-    return True  # custom app scheme (e.g. claude://)
+    if scheme == "https":
+        return bool(u.hostname) and (not hosts or u.hostname.lower() in hosts)
+    return scheme in KNOWN_APP_SCHEMES or scheme in schemes or "." in scheme
+
+
+def redirect_label(uri: str) -> str:
+    """Where the browser is sent after sign-in, shown on the sign-in page."""
+    u = urlsplit(uri)
+    return u.netloc if u.scheme in ("http", "https") else f"{u.scheme}://{u.netloc}".rstrip("/")
 
 
 def pkce_ok(verifier: str, challenge: str) -> bool:
     if not (43 <= len(verifier) <= 128):
         return False
     digest = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    return hmac.compare_digest(digest, challenge)
+    return hmac.compare_digest(digest.encode(), challenge.encode("utf-8", "replace"))
 
 
 def add_query(uri: str, **params: str) -> str:
@@ -69,6 +88,49 @@ def _json(data: dict, status: int = 200) -> JSONResponse:
 
 def _html(body: str, status: int = 200) -> HTMLResponse:
     return HTMLResponse(body, status_code=status, headers=SEC_HEADERS)
+
+
+class BodyLimit:
+    """Reject oversized request bodies before any handler reads them (memory DoS). The body is
+    buffered up to the limit and replayed, so chunked uploads are covered as well."""
+
+    def __init__(self, app, oauth_limit: int, mcp_limit: int) -> None:
+        self.app, self.oauth_limit, self.mcp_limit = app, oauth_limit, mcp_limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] in ("GET", "HEAD", "OPTIONS"):
+            return await self.app(scope, receive, send)
+        path = scope["path"]
+        limit = self.mcp_limit if path == "/mcp" or path.startswith("/mcp/") else self.oauth_limit
+        declared = dict(scope["headers"]).get(b"content-length", b"")
+        chunks, size = [], 0
+        too_big = declared.isdigit() and int(declared) > limit
+        while not too_big:
+            msg = await receive()
+            if msg["type"] == "http.disconnect":
+                return
+            body = msg.get("body", b"")
+            size += len(body)
+            if size > limit:
+                too_big = True
+                break
+            chunks.append(body)
+            if not msg.get("more_body"):
+                break
+        if too_big:
+            log.warning("request body over %d bytes rejected (%s)", limit, clean(path))
+            await send({"type": "http.response.start", "status": 413,
+                        "headers": [(b"content-type", b"application/json")]})
+            return await send({"type": "http.response.body", "body": b'{"error":"payload_too_large"}'})
+        replay = iter([{"type": "http.request", "body": b"".join(chunks), "more_body": False}])
+
+        async def replay_receive():
+            try:
+                return next(replay)
+            except StopIteration:
+                return await receive()  # waits for disconnect
+
+        await self.app(scope, replay_receive, send)
 
 
 class Cors:
@@ -150,7 +212,7 @@ class McpGuard:
         hdrs = dict(scope["headers"])
         origin = hdrs.get(b"origin", b"").decode("latin-1")
         if origin and not self._origin_ok(origin):
-            log.warning("mcp: rejected foreign origin %s", origin[:100])
+            log.warning("mcp: rejected foreign origin %s", clean(origin))
             return await self._deny(send, 403, None, b'{"error":"forbidden_origin"}')
         auth = hdrs.get(b"authorization", b"").decode("latin-1")
         token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
@@ -174,11 +236,11 @@ def build_app(config: Config) -> Starlette:
     mcp = create_mcp(store, config.host, config.port)
     mcp_app = mcp.streamable_http_app()
 
-    login_ip = RateLimiter(10, 600)       # sign-in attempts per IP / 10 min
-    login_acct = RateLimiter(5, 600)      # per e-mail / 10 min (protects the Bosch account)
-    register_ip = RateLimiter(20, 3600)
-    token_ip = RateLimiter(60, 60)
-    mcp_limit = RateLimiter(120, 60)      # MCP calls per user / minute
+    login_ip = RateLimiter(config.rate_login_ip, 600)         # sign-in attempts per IP
+    login_acct = RateLimiter(config.rate_login_account, 600)  # FAILED sign-ins per e-mail (protects the Bosch account)
+    register_ip = RateLimiter(config.rate_register_ip, 3600)
+    token_ip = RateLimiter(config.rate_token_ip, 60)
+    mcp_limit = RateLimiter(config.rate_mcp_user, 60)         # MCP calls per user
 
     issuer = config.public_url
     metadata_url = f"{issuer}/.well-known/oauth-protected-resource"
@@ -188,12 +250,17 @@ def build_app(config: Config) -> Starlette:
     allow_loopback = (iparts.hostname or "") in LOOPBACK
 
     def client_ip(request: Request) -> str:
-        if config.trust_proxy:
-            h = request.headers
-            ip = h.get("cf-connecting-ip") or h.get("x-forwarded-for", "").split(",")[0].strip()
-            if ip:
-                return ip
-        return request.client.host if request.client else "unknown"
+        h = request.headers
+        ip = ""
+        if config.proxy_mode == "cloudflare":
+            ip = h.get("cf-connecting-ip", "").strip()
+        elif config.proxy_mode == "xff":
+            # each trusted proxy appends the address it saw; the entry PROXY_HOPS from the right is the
+            # real client. Anything further left is client-supplied and can be forged.
+            hops = [x.strip() for x in h.get("x-forwarded-for", "").split(",") if x.strip()]
+            if len(hops) >= config.proxy_hops:
+                ip = hops[-config.proxy_hops]
+        return ip[:64] or (request.client.host if request.client else "unknown")
 
     def lang_of(request: Request) -> str:
         return pages.pick_lang(request.headers.get("accept-language", ""))
@@ -225,11 +292,15 @@ def build_app(config: Config) -> Starlette:
             body = await request.json()
             uris = body["redirect_uris"]
             assert isinstance(uris, list) and 1 <= len(uris) <= 10
-            assert all(isinstance(u, str) and valid_redirect_uri(u) for u in uris)
+            assert all(isinstance(u, str) and valid_redirect_uri(
+                u, config.allowed_redirect_hosts, config.allowed_redirect_schemes) for u in uris)
         except Exception:
             log.warning("oauth: registration rejected (invalid redirect uris)")
             return _json({"error": "invalid_redirect_uri"}, 400)
-        name = str(body.get("client_name") or "")[:100]
+        if store.count_clients() >= config.max_clients:
+            log.warning("oauth: client registration refused (MAX_CLIENTS reached)")
+            return _json({"error": "temporarily_unavailable"}, 503)
+        name = clean(body.get("client_name") or "")
         cid = store.create_client(name, uris)
         log.info("oauth: registered client '%s' (%d redirect uri)", name or "-", len(uris))
         return _json({"client_id": cid, "client_id_issued_at": int(time.time()), "client_name": name, "redirect_uris": uris,
@@ -263,7 +334,8 @@ def build_app(config: Config) -> Starlette:
                 return _html(pages.message_page(pages.T[lang_of(request)]["msg_invalid"], err, lang_of(request)), 400)
             log.debug("oauth: sign-in page for client '%s'", client["name"])
             csrf = secrets.token_urlsafe(24)
-            resp = _html(pages.authorize_page(client_name=client["name"], params=params, csrf=csrf, lang=lang_of(request)))
+            resp = _html(pages.authorize_page(client_name=client["name"], params=params, csrf=csrf, lang=lang_of(request),
+                                              redirect_to=redirect_label(params["redirect_uri"])))
             resp.set_cookie("csrf", csrf, httponly=True, samesite="strict",
                             secure=config.secure_cookies, max_age=900, path="/oauth/authorize")
             return resp
@@ -276,7 +348,7 @@ def build_app(config: Config) -> Starlette:
             return _html(pages.message_page(pages.T[lang_of(request)]["msg_invalid"], err, lang_of(request)), 400)
 
         csrf_cookie = request.cookies.get("csrf", "")
-        if not csrf_cookie or not hmac.compare_digest(csrf_cookie, form.get("csrf", "")):
+        if not csrf_cookie or not hmac.compare_digest(csrf_cookie.encode(), form.get("csrf", "").encode("utf-8", "replace")):
             log.warning("oauth: sign-in rejected (csrf mismatch)")
             tl = pages.T[lang_of(request)]
             return _html(pages.message_page(tl["msg_expired"], tl["msg_expired_t"], lang_of(request)), 400)
@@ -289,19 +361,21 @@ def build_app(config: Config) -> Starlette:
         def again(msg: str, status: int = 200) -> Response:
             resp = _html(pages.authorize_page(client_name=client["name"], params=params,
                                               csrf=csrf_cookie, error=msg, email=email,
-                                              lang=lang_of(request)), status)
+                                              lang=lang_of(request),
+                                              redirect_to=redirect_label(params["redirect_uri"])), status)
             return resp
 
         if "@" not in email or not password or len(email) > 254 or len(password) > 256:
             return again(tt["e_fields"])
         key = normalize_account_key(email)
-        if not login_ip.hit(client_ip(request)) or not login_acct.hit(key):
+        if not login_ip.hit(client_ip(request)) or not login_acct.allowed(key):
             log.warning("oauth: sign-in rate limit exceeded (ip %s, account %s)", client_ip(request), mask_email(key))
             return again(tt["e_many"], 429)
 
         try:
             remember = await asyncio.wait_for(login(email, password), timeout=30)
         except AuthRequired:
+            login_acct.hit(key)  # only failures count, so strangers cannot lock a user out by just trying
             log.warning("oauth: sign-in rejected by eBike Connect (account %s)", mask_email(key))
             return again(tt["e_bad"])
         except (EBikeError, asyncio.TimeoutError, OSError) as e:
@@ -310,6 +384,15 @@ def build_app(config: Config) -> Starlette:
         finally:
             del password
 
+        try:
+            prev = store.get_account(key)
+        except Exception:
+            prev = None
+        if prev and prev.get("username") != email:
+            # same normalised key, different spelling: could be another Bosch account. Do not let
+            # tokens issued for the previous session read this one.
+            log.warning("oauth: sign-in spelling differs from stored one, revoking tokens (%s)", mask_email(key))
+            store.revoke_tokens(key)
         store.upsert_account(key, {"username": email, "remember": remember})
         log.info("oauth: signed in %s via '%s'", mask_email(key), client["name"] or "-")
         code = store.put_code(client["client_id"], key, params["redirect_uri"],
@@ -384,8 +467,10 @@ def build_app(config: Config) -> Starlette:
             ver = version("bosch-ebike-connect-classic")
         except Exception:
             ver = "?"
-        log.info("starting bosch-ebike-connect-classic %s: public_url=%s data_dir=%s log_level=%s trust_proxy=%s",
-                 ver, config.public_url, config.data_dir, config.log_level, config.trust_proxy)
+        log.info("starting bosch-ebike-connect-classic %s: public_url=%s data_dir=%s log_level=%s proxy=%s",
+                 ver, config.public_url, config.data_dir, config.log_level, config.proxy_mode or "off")
+        if config.public_url.startswith("http://") and (iparts.hostname or "") not in LOOPBACK:
+            log.warning("PUBLIC_URL is plain http on a non-local address: passwords travel in cleartext")
         try:
             async with mcp_app.router.lifespan_context(mcp_app):
                 yield
@@ -407,7 +492,7 @@ def build_app(config: Config) -> Starlette:
     ]
     inner = Starlette(routes=routes, lifespan=lifespan)
     inner.state.store = store
-    app = Cors(inner, allowed_origins, allow_loopback)
+    app = BodyLimit(Cors(inner, allowed_origins, allow_loopback), config.max_body_bytes, config.max_mcp_body_bytes)
     app.state = inner.state  # tests reach the store through app.state
     app.router = inner.router
     return app

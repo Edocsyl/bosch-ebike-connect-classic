@@ -7,8 +7,9 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       PUBLIC_URL: http://localhost:8080     # address your clients use (https://... when public)
-      # TRUST_PROXY: "1"                    # behind Cloudflare / a reverse proxy
+      # TRUST_PROXY: "xff"                 # behind a reverse proxy ("cloudflare" for a Cloudflare tunnel)
       # LOG_LEVEL: info                     # debug | info | warning | error
+      # RATE_MCP_USER: "120"                # more limits: see README "Configuration"
       # GATEWAY_SECRET: ...                 # optional: else generated into ./config/gateway.secret
     volumes:
       - ./config:/data              # everything the server keeps: database + secret
@@ -16,3 +17,5 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 200

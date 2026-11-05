@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from contextvars import ContextVar
 from datetime import datetime
@@ -19,12 +20,20 @@ import sys
 import time
 
 from .client import AuthRequired, BoschClient, EBikeError
-from .logutil import log, mask_email
+from .logutil import clean, log, mask_email
 from .store import Store
 
 current_account: ContextVar[str | None] = ContextVar("current_account", default=None)
 
-ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")  # used with fullmatch
+
+
+def is_id(value: str) -> bool:
+    return ID_RE.fullmatch(value) is not None
+
+
+def is_numeric_id(value: str) -> bool:
+    return value.isascii() and value.isdigit() and len(value) <= 20
 SERIES_KEYS ={"cadence", "heart_rate", "speed", "coordinates", "portal_altitudes", "power_output"}
 
 EXPIRED = ("Error: the eBike Connect session expired. Disconnect and reconnect this "
@@ -72,7 +81,7 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
             store.revoke_tokens(key)
             return _res(EXPIRED)
         except EBikeError as e:
-            log.info("tool %s: portal error for %s: %s", tool, mask_email(key), e)
+            log.info("tool %s: portal error for %s: %s", tool, mask_email(key), clean(str(e), 200))
             return _res(f"Error: {e}")
         except Exception as e:  # network errors etc.
             log.error("tool %s failed for %s: %s", tool, mask_email(key), type(e).__name__,
@@ -120,7 +129,7 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
             include_series: Include time series (speed, cadence, heart rate, GPS, altitude,
                 power). Large; default False returns aggregates only.
         """
-        if not activity_id.isdigit():
+        if not is_numeric_id(activity_id):
             return _res("Error: activity_id must be numeric")
 
         async def go(c: BoschClient):
@@ -147,7 +156,7 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
             kind: 'ride' or 'trip'.
             timezone: IANA time zone for local times in the export (default Europe/Zurich).
         """
-        if not activity_id.isdigit():
+        if not is_numeric_id(activity_id):
             return _res("Error: activity_id must be numeric")
         try:
             offset = datetime.now(ZoneInfo(timezone)).utcoffset()
@@ -186,12 +195,22 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
         n = max(1, min(int(max_items), 100))
 
         def conv(v, factor):  # the portal wants whole numbers: metres and milliseconds
-            return None if v is None else max(0, int(round(v * factor)))
+            if v is None:
+                return None
+            if not math.isfinite(v):
+                raise ValueError("distance and duration filters must be finite numbers")
+            return max(0, min(int(round(v * factor)), 2**31 - 1))
+
+        try:
+            filters = (conv(min_distance_km, 1000), conv(max_distance_km, 1000),
+                       conv(min_duration_min, 60000), conv(max_duration_min, 60000))
+        except ValueError as e:
+            return _res(f"Error: {e}")
 
         return await run(lambda c: c.search_rides(
             n, offset, title=title,
-            min_distance=conv(min_distance_km, 1000), max_distance=conv(max_distance_km, 1000),
-            min_driving_time=conv(min_duration_min, 60000), max_driving_time=conv(max_duration_min, 60000)))
+            min_distance=filters[0], max_distance=filters[1],
+            min_driving_time=filters[2], max_driving_time=filters[3]))
 
     @mcp.tool()
     async def get_saved_places() -> CallToolResult:
@@ -207,14 +226,14 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
             segmented: True for routes planned with the route builder (segments),
                 False for imported GPX routes.
         """
-        if not ID_RE.match(route_id):
+        if not is_id(route_id):
             return _res("Error: invalid route_id")
         return await run(lambda c: c.route_details(route_id, segmented))
 
     @mcp.tool()
     async def export_route_gpx(route_id: str) -> CallToolResult:
         """Export a saved route as GPX text."""
-        if not ID_RE.match(route_id):
+        if not is_id(route_id):
             return _res("Error: invalid route_id")
         return await run(lambda c: c.export_route_gpx(route_id))
 

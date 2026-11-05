@@ -31,3 +31,9 @@ def mask_email(email: str) -> str:
     local, _, domain = (email or "").partition("@")
     host, _, tld = domain.rpartition(".")
     return f"{local[:1]}***@{host[:1]}***.{tld}" if local and host and tld else "***"
+
+
+def clean(value: str, limit: int = 100) -> str:
+    """Make untrusted text safe for a log line or a display name: no control characters
+    (log injection), bounded length."""
+    return "".join(c if c.isprintable() else " " for c in str(value))[:limit].strip()

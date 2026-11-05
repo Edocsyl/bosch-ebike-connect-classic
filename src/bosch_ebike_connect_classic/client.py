@@ -7,6 +7,7 @@ sends ``Accept: application/vnd.ebike-connect.com.v4+json`` and ``Protect-from: 
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Callable
 
@@ -17,6 +18,7 @@ from .logutil import log
 BASE = "https://www.ebike-connect.com"
 API = f"{BASE}/ebikeconnect/api"
 COOKIE = "REMEMBER"
+MAX_RESPONSE_BYTES = int(os.environ.get("MAX_PORTAL_RESPONSE_BYTES", "10485760"))  # cap per portal reply
 HEADERS = {
     "Accept": "application/vnd.ebike-connect.com.v4+json, application/json",
     "Protect-from": "CSRF",
@@ -95,6 +97,8 @@ class BoschClient:
             raise AuthRequired(401, "session expired")
         if resp.status_code >= 400:
             raise EBikeError(resp.status_code, _err_message(resp))
+        if len(resp.content) > MAX_RESPONSE_BYTES:
+            raise EBikeError(502, f"portal response too large ({len(resp.content)} bytes, limit {MAX_RESPONSE_BYTES})")
         if method == "POST" and not resp.content:
             return {"status": resp.status_code}
         return resp.text if raw else resp.json()

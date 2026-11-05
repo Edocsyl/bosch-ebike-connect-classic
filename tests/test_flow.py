@@ -191,14 +191,15 @@ def test_refresh_rotation_and_cookie_rotation_persisted(client, app):
     new = client.post("/oauth/token", content=urlencode({
         "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": cid}), headers=form)
     assert new.status_code == 200
-    replay = client.post("/oauth/token", content=urlencode({
-        "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": cid}), headers=form)
-    assert replay.status_code == 400
-
     respx.get(f"{API}/user/profile").mock(return_value=httpx.Response(
         200, json={"ok": 1}, headers={"set-cookie": "REMEMBER=rotated; Path=/"}))
     assert json.loads(tool_text(call_tool(client, new.json()["access_token"], "get_user_profile"))) == {"ok": 1}
     assert app.state.store.get_account("a@b.ch")["remember"] == "rotated"
+
+    # replaying the spent refresh token fails (and revokes the family, see test_security.py)
+    replay = client.post("/oauth/token", content=urlencode({
+        "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": cid}), headers=form)
+    assert replay.status_code == 400
 
 
 @respx.mock

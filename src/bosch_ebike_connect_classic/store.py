@@ -23,6 +23,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .logutil import log, mask_email
+
 ACCESS_TTL = 3600
 REFRESH_TTL = 30 * 86400
 CODE_TTL = 600
@@ -52,14 +54,19 @@ def normalize_account_key(email: str) -> str:
 
 class Store:
     def __init__(self, path: Path, secret: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.executescript(SCHEMA)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        old_umask = os.umask(0o077)  # db, -wal and -shm are created owner-only from the start
         try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+            self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.executescript(SCHEMA)
+        finally:
+            os.umask(old_umask)
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.chmod(f"{path}{suffix}", 0o600)
+            except OSError:
+                pass
         self._lock = threading.Lock()
         key = HKDF(hashes.SHA256(), 32, None, b"bosch-ebike-connect/blob/v1").derive(secret.encode())
         self._aes = AESGCM(key)
@@ -112,6 +119,10 @@ class Store:
             )
         return client_id
 
+    def count_clients(self) -> int:
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
+
     def get_client(self, client_id: str) -> dict | None:
         with self._lock:
             row = self._db.execute(
@@ -152,12 +163,25 @@ class Store:
                 "refresh_token": refresh}
 
     def rotate_refresh(self, refresh: str, client_id: str) -> dict | None:
+        """Rotate a refresh token. The spent token stays as 'refresh_used' until it expires:
+        presenting it again means it leaked, so every token of that client/account is revoked."""
         with self._lock:
             row = self._db.execute(
-                "DELETE FROM tokens WHERE token_hash=? AND kind='refresh' AND client_id=? "
-                "RETURNING account_key,expires_at", (h(refresh), client_id)
+                "UPDATE tokens SET kind='refresh_used' WHERE token_hash=? AND kind='refresh' "
+                "AND client_id=? RETURNING account_key,expires_at", (h(refresh), client_id)
             ).fetchone()
-        if not row or row[1] < time.time():
+            if not row:
+                reused = self._db.execute(
+                    "SELECT account_key FROM tokens WHERE token_hash=? AND kind='refresh_used' "
+                    "AND client_id=?", (h(refresh), client_id)
+                ).fetchone()
+                if reused:
+                    self._db.execute("DELETE FROM tokens WHERE account_key=? AND client_id=?",
+                                     (reused[0], client_id))
+                    log.warning("oauth: spent refresh token replayed, revoked all tokens of %s for this client",
+                                mask_email(reused[0]))
+                return None
+        if row[1] < time.time():
             return None
         return self.issue_tokens(client_id, row[0])
 
@@ -179,3 +203,7 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM tokens WHERE expires_at<?", (now,))
             self._db.execute("DELETE FROM codes WHERE expires_at<?", (now,))
+            # clients nobody ever finished a sign-in with (open registration must not grow forever)
+            self._db.execute(
+                "DELETE FROM clients WHERE created_at<? AND client_id NOT IN "
+                "(SELECT client_id FROM tokens UNION SELECT client_id FROM codes)", (now - 7 * 86400,))

@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# pinned by digest (multi-arch index); bump deliberately to take base-image security updates
+FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
     DATA_DIR=/data PORT=8080

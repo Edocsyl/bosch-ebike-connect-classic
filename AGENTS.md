@@ -38,7 +38,7 @@ Dockerfile, docker-compose.yml, .github/workflows/{ci,release}.yml
 
 ```bash
 pip install -e ".[dev]"      # install with test dependencies
-pytest -q                    # 20 tests, no network, no real Bosch account
+pytest -q                    # 37 tests, no network, no real Bosch account
 docker compose up -d --build # build and run locally (data in ./config, port 127.0.0.1:8080)
 docker compose logs -f
 ```
@@ -83,8 +83,10 @@ SQLite (`<DATA_DIR>/gateway.sqlite3`, WAL): `clients(client_id, name, redirect_u
 client_id, account_key, redirect_uri, challenge, expires_at)`, `tokens(token_hash, kind, client_id, account_key,
 expires_at)`, `accounts(account_key, blob, updated_at)`. `account_key` is the lower-case login e-mail; `blob` is
 the AES-256-GCM sealed JSON `{username, remember}`. TTLs: code 10 min, access 1 h, refresh 30 d. Expired rows
-are purged hourly. Rate limits (`app.py`): sign-in 10 / 10 min per IP and 5 / 10 min per e-mail, registration
-20 / h per IP, token 60 / min per IP, MCP 120 / min per user.
+are purged hourly (clients without any token or code after 7 days). Rate limits (defaults, configurable, see
+Configuration): sign-in 10 / 10 min per IP and 5 failures / 10 min per e-mail, registration 20 / h per IP,
+token 60 / min per IP, MCP 120 / min per user. `token.kind` is `access`, `refresh` or `refresh_used` (spent,
+kept to detect replay).
 
 ## How to
 
@@ -110,7 +112,7 @@ deliberate migration, not a bump.
 
 ## Testing
 
-- `pytest -q` runs `tests/test_flow.py` (20 tests): OAuth flow and user isolation, 401 challenge, wrong
+- `pytest -q` runs `tests/test_flow.py` (20 tests) and `tests/test_security.py` (17 tests: redirect schemes, body caps, limiter bounds, proxy IP spoofing, refresh replay, spelling change, DB permissions, validation, limit config): OAuth flow and user isolation, 401 challenge, wrong
   password, single-use code and PKCE, redirect / CSRF rejection, expired-session re-authorisation, refresh and
   cookie rotation, export time zones, read tools against mocked endpoints, `disconnect_account`, encryption at
   rest, Origin / resource / `iss` / `isError`, sign-in and success pages, config secret generation, log levels
@@ -158,7 +160,16 @@ when you add log lines near credentials.
   endpoints.
 - `GATEWAY_SECRET` is generated into `<data>/gateway.secret` (0600) when not set. Setting it as an
   environment variable keeps the key apart from the data it protects.
-- Container: non-root, read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`.
+- Container: non-root, read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, memory / pids limits,
+  base image pinned by digest (bump it deliberately).
+- Redirect URIs: https (optionally host-restricted), loopback http, known app schemes or reverse-DNS schemes
+  only; never `ms-*` / `search-ms` / `javascript` etc. The sign-in page shows the redirect target and that the
+  client name is unverified. Client names are stripped of control characters (log injection).
+- Request bodies are capped by `BodyLimit` (outermost middleware) before any handler reads them.
+- Client IP: never trust `X-Forwarded-For` blindly; `xff` mode takes the entry `PROXY_HOPS` from the right.
+- Replaying a spent refresh token revokes all tokens of that client and account; a sign-in whose e-mail
+  spelling differs from the stored one revokes the account's tokens.
+- Compare secrets as bytes (`hmac.compare_digest` raises on non-ASCII `str`).
 
 ## Configuration (environment)
 
@@ -167,9 +178,14 @@ when you add log lines near credentials.
 | `GATEWAY_SECRET` | generated in `<DATA_DIR>/gateway.secret` | ≥ 32 characters |
 | `PUBLIC_URL` | `http://localhost:<PORT>` | OAuth issuer; no trailing slash |
 | `DATA_DIR` | `/data` | SQLite and secret (mounted from `./config` by Compose) |
-| `TRUST_PROXY` | `0` | `1`: rate limits use `CF-Connecting-IP` / `X-Forwarded-For` |
+| `TRUST_PROXY` | off | `xff`/`1` (X-Forwarded-For, entry `PROXY_HOPS` from the right) or `cloudflare` (CF-Connecting-IP only) |
+| `PROXY_HOPS` | `1` | trusted proxies in `xff` mode |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` (case-insensitive; `WARN` accepted) |
 | `ALLOWED_ORIGINS` | empty | extra browser origins for `/mcp` |
+| `ALLOWED_REDIRECT_HOSTS` / `ALLOWED_REDIRECT_SCHEMES` | empty | restrict / extend client redirect URIs |
+| `ALLOW_INSECURE_HTTP` | off | allow `http://` `PUBLIC_URL` on a non-loopback host (startup refuses otherwise) |
+| `RATE_LOGIN_IP`, `RATE_LOGIN_ACCOUNT`, `RATE_REGISTER_IP`, `RATE_TOKEN_IP`, `RATE_MCP_USER` | 10, 5, 20, 60, 120 | rate limits (windows fixed in `build_app`); `RATE_LOGIN_ACCOUNT` counts failures only |
+| `MAX_BODY_BYTES`, `MAX_MCP_BODY_BYTES`, `MAX_CLIENTS`, `MAX_PORTAL_RESPONSE_BYTES` | 16 KiB, 1 MiB, 10000, 10 MiB | size caps |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | |
 
 ## Versioning and releases
@@ -238,7 +254,9 @@ Quirks:
   `MCP-Protocol-Version` / `Mcp-Method` header validation, Client ID Metadata Documents. Custom-scheme
   redirect URIs are still accepted at registration.
 - Tested live with a scripted OAuth client and Claude Code; not with Claude Desktop, Claude web or other clients.
-- SQLite in one container: no horizontal scaling.
+- SQLite and in-memory rate limiting in one container: no horizontal scaling. `RateLimiter` is the seam for a
+  shared backend (e.g. Redis) if that is ever needed; callers use only `hit()` / `allowed()`. Not implemented.
+- Security review so far: one automated code review (no Critical/High); no external audit or pentest.
 
 ## CI and Docker
 
