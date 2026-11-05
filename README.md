@@ -20,7 +20,7 @@ Run the published image. You need Docker with Compose and one file in an empty f
 ```yaml
 services:
   bosch-ebike-connect-classic:
-    image: ghcr.io/edocsyl/bosch-ebike-connect-classic:1.1.0
+    image: ghcr.io/edocsyl/bosch-ebike-connect-classic:1.0.0
     user: "1000:1000"               # owner of ./config (run `id -u` / `id -g`)
     ports:
       - "127.0.0.1:8080:8080"
@@ -89,7 +89,7 @@ file must be its owner. To put the data elsewhere, change the left side of the v
 `/srv/ebike:/data`. Deleting the folder (container stopped) removes all users' sessions. For a stricter
 setup set `GATEWAY_SECRET` yourself and keep it out of `./config`, so a copy of the folder alone is useless.
 
-**Updates:** pin an exact version in `image:` (e.g. `:1.1.0`), change it to update, then
+**Updates:** pin an exact version in `image:` (e.g. `:1.0.0`), change it to update, then
 `docker compose pull && docker compose up -d`. The data in `./config` is kept; go back by setting the old
 version. Releases and what changed: [CHANGELOG](CHANGELOG.md).
 

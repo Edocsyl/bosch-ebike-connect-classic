@@ -1,6 +1,6 @@
 services:
   bosch-ebike-connect-classic:
-    image: ghcr.io/edocsyl/bosch-ebike-connect-classic:1.1.0
+    image: ghcr.io/edocsyl/bosch-ebike-connect-classic:1.0.0
     build: .                        # `docker compose up -d --build` builds it locally instead
     user: "1000:1000"               # owner of ./config (run `id -u` / `id -g`)
     ports:
