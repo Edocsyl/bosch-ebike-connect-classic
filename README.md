@@ -91,7 +91,7 @@ setup set `GATEWAY_SECRET` yourself and keep it out of `./config`, so a copy of 
 
 **Updates:** pin an exact version in `image:` (e.g. `:1.0.0`), change it to update, then
 `docker compose pull && docker compose up -d`. The data in `./config` is kept; go back by setting the old
-version. Releases and what changed: [CHANGELOG](CHANGELOG.md).
+version. What changed in each version: [Releases](../../releases).
 
 **Going public:** put TLS in front (for example `cloudflared tunnel --url http://localhost:8080`), set
 `PUBLIC_URL` to the https address and `TRUST_PROXY: "1"`. You then hold other people's Bosch sessions and ride

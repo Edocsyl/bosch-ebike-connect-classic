@@ -30,7 +30,7 @@ src/bosch_ebike_connect_classic/
   pages.py      HTML pages (sign-in, success, message, landing); English only, no JavaScript
   ratelimit.py  Sliding-window limiter
 tests/test_flow.py   Whole OAuth flow + tools against a fake Bosch (respx)
-Dockerfile, docker-compose.yml, .github/workflows/{ci,release}.yml, CHANGELOG.md
+Dockerfile, docker-compose.yml, .github/workflows/{ci,release}.yml
 ```
 
 ## Commands
@@ -101,7 +101,7 @@ PATCH release.
 
 **Change the data model.** `store.py` uses `CREATE TABLE IF NOT EXISTS`; there is no migration framework. A
 schema change needs an explicit, backwards-compatible migration step in `Store.__init__` and a MAJOR or MINOR
-bump with a CHANGELOG note.
+bump and a clear note in the release.
 
 **Update a dependency.** Bump in `pyproject.toml`, run `pytest`, build the image. `mcp` is pinned `<2`:
 SDK 2.x renamed `FastMCP` to `MCPServer` and implements the 2026-07-28 protocol revision, so moving to it is a
@@ -165,7 +165,9 @@ deliberate migration, not a bump.
 
 Release steps:
 
-1. Set the new version in `pyproject.toml` and add a section to `CHANGELOG.md`.
+1. Set the new version in `pyproject.toml`. There is no changelog file: the release notes on GitHub are the
+   changelog (the pipeline generates them from the commits and pull requests since the last tag; edit the
+   release on GitHub afterwards if you want a nicer text).
 2. Update the image tag in `docker-compose.yml` and in the README quick start.
 3. Commit, push, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
@@ -225,7 +227,7 @@ Quirks:
   check on `/healthz`, entrypoint `bosch-ebike-connect-classic`. Compose runs it with `user: "1000:1000"` so a
   bind-mounted `./config` is writable; without `--user` the data folder must be owned by `10001:10001`.
 - `ci.yml`: tests on Python 3.11 / 3.12 / 3.13, then image build and smoke test. Path-filtered: README and
-  CHANGELOG edits do not trigger it. Uses the GitHub Actions cache for Docker layers.
+  Documentation edits do not trigger it. Uses the GitHub Actions cache for Docker layers.
 - `release.yml`: only on tags `vX.Y.Z`. Needs no secrets (built-in `GITHUB_TOKEN`; permissions `contents:
   write`, `packages: write`). After the first publish the GHCR package is private until its visibility is
   changed in the package settings.
