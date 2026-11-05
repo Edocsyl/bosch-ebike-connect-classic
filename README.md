@@ -8,6 +8,9 @@ bikes. Multi-user (everyone signs in with their own account), OAuth 2.1, one Doc
 > without notice, and Bosch's terms may restrict automated access. Use at your own risk.
 > Classic system only (ebike-connect.com), not the Smart System / eBike Flow app.
 
+**Developers and contributors:** everything technical (architecture, tests, security rules, releases, portal API
+notes) is in **[AGENTS.md](AGENTS.md)**. This README is for people who run and use the server.
+
 ## Quick start
 
 Run the published image. You need Docker with Compose and one file in an empty folder.
@@ -159,7 +162,7 @@ Client ──POST /mcp + Bearer──▶ guard ─▶ MCP tools ─▶ ebike-con
 
 ## Contributing, credits and license
 
-Developer documentation: [AGENTS.md](AGENTS.md). Endpoints found in the portal's web bundle and in [ebike-connect-js](https://github.com/FlorianCassayre/ebike-connect-js).
+Contributions are welcome: start with [AGENTS.md](AGENTS.md). Endpoints found in the portal's web bundle and in [ebike-connect-js](https://github.com/FlorianCassayre/ebike-connect-js).
 Gateway architecture inspired by [missingmcp](https://github.com/VelkyVenik/missingmcp) and
 [garmin_mcp](https://github.com/taxuspt/garmin_mcp) (no code shared). Licensed under the [MIT License](LICENSE);
 "Bosch" and "eBike Connect" are trademarks of their owners.
