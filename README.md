@@ -171,17 +171,73 @@ are private by default).
 
 ### Deploy the published image
 
-**Docker Compose** (recommended): the `docker-compose.yml` in this repository already points at the
-published image. On the server you only need that file and a `.env`:
+The image is published at `ghcr.io/edocsyl/bosch-ebike-connect-classic` (replace the path with your own
+`<owner>/<repo>` if you fork the project). It supports `linux/amd64` and `linux/arm64`, so it also runs
+on a Raspberry Pi or an ARM server.
 
-```bash
-mkdir -p config                       # persistent data (or set DATA_PATH in .env)
-cp .env.example .env                  # set GATEWAY_SECRET and PUBLIC_URL; set PUID/PGID if not 1000
-docker compose pull && docker compose up -d
+**1. Make the image pullable.** Packages are private after the first publish. Either:
+
+- *Make it public:* on GitHub open your profile → *Packages* → `bosch-ebike-connect-classic` →
+  *Package settings* → *Change visibility* → Public. Then no login is needed to pull.
+- *Or keep it private and log in on every server that pulls it,* with a personal access token
+  (classic) that has only the `read:packages` scope:
+
+  ```bash
+  echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+  ```
+
+**2. Deploy with Docker Compose (recommended).** You do not need to clone the repository, only a folder
+with two files. Create `docker-compose.yml`:
+
+```yaml
+services:
+  bosch-ebike-connect-classic:
+    image: ghcr.io/edocsyl/bosch-ebike-connect-classic:1.0.0
+    container_name: bosch-ebike-connect-classic
+    env_file: .env
+    environment:
+      - DATA_DIR=/data
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "127.0.0.1:8080:8080"          # put TLS / a Cloudflare Tunnel in front
+    volumes:
+      - ${DATA_PATH:-./config}:/data   # persistent data: ./config, or set DATA_PATH
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 ```
 
-Update to a new version: set `IMAGE_TAG` (or leave `latest`) and run `docker compose pull && docker
-compose up -d`. The data in `./config` is kept.
+and a `.env` (`GATEWAY_SECRET` from `openssl rand -base64 48`; `PUBLIC_URL` is the address your clients
+use; see [Configuration](#configuration) for the optional values):
+
+```
+GATEWAY_SECRET=<at least 32 characters>
+PUBLIC_URL=https://ebike.example.com
+TRUST_PROXY=1
+#DATA_PATH=/srv/ebike
+#PUID=1000
+#PGID=1000
+```
+
+Then:
+
+```bash
+mkdir -p config                       # persistent data; must be owned by PUID:PGID
+docker compose pull && docker compose up -d
+curl http://localhost:8080/healthz    # -> ok
+```
+
+If you cloned the repository instead, its `docker-compose.yml` already points at this image: use the
+same commands (`docker compose up -d` pulls, `--build` builds locally).
+
+**3. Update.** Set the new version in `image:` (or `IMAGE_TAG` in `.env` when using the repository's
+compose file) and run `docker compose pull && docker compose up -d`. The data in `./config` is kept. Tags
+are `1.0.0` (exact), `1.0` (latest patch), `latest` and `main` (current development state). Pin an exact
+version in production.
+
+**4. Roll back.** Set the previous version tag and run the same two commands.
 
 **Plain `docker run`**, with the data in `./config` (change the left side of `-v` for another folder):
 
@@ -190,16 +246,14 @@ mkdir -p config
 docker run -d --name bosch-ebike-connect-classic --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   --user "$(id -u):$(id -g)" -v "$PWD/config:/data" \
-  -e GATEWAY_SECRET="$(openssl rand -base64 48)" -e PUBLIC_URL=http://localhost:8080 \
+  --env-file .env -e DATA_DIR=/data \
   --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
   ghcr.io/edocsyl/bosch-ebike-connect-classic:1.0.0
 ```
 
-Keep the generated `GATEWAY_SECRET` (put it in an env file and pass `--env-file` instead): a new
-secret makes the stored sessions unreadable. Without `--user` the image runs as uid 10001, so the
-mounted folder must then be owned by `10001:10001` (`sudo chown 10001:10001 config`).
-
-Replace `edocsyl/bosch-ebike-connect-classic` with your own `<owner>/<repo>` if you fork the project.
+Use an `--env-file` with a fixed `GATEWAY_SECRET`: a new secret makes the stored sessions unreadable.
+Without `--user` the image runs as uid 10001, so the mounted folder must then be owned by `10001:10001`
+(`sudo chown 10001:10001 config`).
 
 No secrets are needed in GitHub: publishing uses the built-in `GITHUB_TOKEN`.
 
