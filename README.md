@@ -60,9 +60,14 @@ Requirements: Docker with Compose.
 
 ```bash
 cp .env.example .env     # set GATEWAY_SECRET (openssl rand -base64 48) and PUBLIC_URL
-docker compose up -d --build
+mkdir -p config          # persistent data lives here (see "Persistent data")
+docker compose up -d     # pulls the published image; add --build to build it locally instead
 curl http://localhost:8080/healthz   # -> ok
 ```
+
+The published image is private until you make it public; run
+`echo <token> | docker login ghcr.io -u <user> --password-stdin` with a token that has
+`read:packages` first, or use `--build`.
 
 For a local test set `PUBLIC_URL=http://localhost:8080`. Add it to Claude Code (which accepts
 `http://localhost` for OAuth):
@@ -75,7 +80,7 @@ claude mcp add --transport http bosch-ebike-connect-classic http://localhost:808
 Sign in with your eBike Connect e-mail and password in the browser window that opens. Then ask, for
 example: *"Show my e-bikes"* or *"When was my last ride?"*.
 
-Stop with `docker compose down` (add `-v` to also delete all stored sessions). Logs:
+Stop with `docker compose down` (the data in `./config` stays). Logs:
 `docker logs -f bosch-ebike-connect-classic`.
 
 ## Connecting clients
@@ -106,11 +111,29 @@ Environment variables (see `.env.example`):
 | `PUBLIC_URL` | yes | – | Externally visible base URL without trailing slash; it is the OAuth issuer and must match what clients connect to. |
 | `TRUST_PROXY` | no | `0` | `1` behind Cloudflare or another trusted proxy: rate limits use `CF-Connecting-IP` / `X-Forwarded-For`. |
 | `ALLOWED_ORIGINS` | no | empty | Extra browser origins (comma separated) allowed to call `/mcp`, only for browser-based MCP clients. |
-| `DATA_DIR` | no | `/data` | Where the SQLite database lives (the `ebike-data` volume in Compose). |
+| `DATA_DIR` | no | `/data` | Where the SQLite database lives *inside* the container. Leave it; change the host folder with `DATA_PATH` (below). |
 | `HOST` / `PORT` | no | `0.0.0.0` / `8080` | Listen address. Compose publishes `127.0.0.1:8080` only. |
 
-Back up the `ebike-data` volume (SQLite). Without the same `GATEWAY_SECRET` the sessions in it are
-unreadable.
+Docker Compose only (set in `.env`, not read by the app):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATA_PATH` | `./config` | Host folder for the persistent data, mounted at `/data`. Relative paths are relative to the compose file; absolute paths work too. |
+| `PUID` / `PGID` | `1000` / `1000` | Numeric user and group that own `DATA_PATH` on the host (`id -u`, `id -g`). The container runs as this user so it can write there. |
+| `IMAGE` / `IMAGE_TAG` | `ghcr.io/edocsyl/bosch-ebike-connect-classic` / `1.0.0` | Published image and version to run. |
+
+### Persistent data
+
+Everything the server keeps (the encrypted Bosch sessions, OAuth clients and tokens) is one SQLite
+database, `gateway.sqlite3`, in the folder mounted at `/data`. By default that is **`./config`** next to
+`docker-compose.yml`; change it with `DATA_PATH`, for example `DATA_PATH=/srv/ebike`.
+
+- Create the folder yourself before the first start (`mkdir -p config`). If Docker creates it, it
+  belongs to root and the container cannot write to it.
+- The folder must be owned by `PUID:PGID` (default `1000:1000`, the usual first user on Linux). If your
+  user has other ids, set them in `.env`.
+- Back up this folder. Without the same `GATEWAY_SECRET` the sessions in it are unreadable.
+- Deleting the folder (with the container stopped) removes every user's stored session.
 
 ## Public hosting
 
@@ -143,14 +166,40 @@ Tags: `latest` and `main` from the default branch; `1.0.0`, `1.0` from a tag `v1
 git tag v1.0.0 && git push origin v1.0.0     # publishes ghcr.io/<owner>/<repo>:1.0.0
 ```
 
-After the first publish, set the package visibility in the repository's *Packages* settings (new
-packages are private by default). To run the published image instead of building locally, replace
-`build: .` in `docker-compose.yml` with `image: ghcr.io/<owner>/<repo>:1.0.0`, or:
+After the first publish, set the package visibility in the package settings on GitHub (new packages
+are private by default).
+
+### Deploy the published image
+
+**Docker Compose** (recommended): the `docker-compose.yml` in this repository already points at the
+published image. On the server you only need that file and a `.env`:
 
 ```bash
-docker run -d --name bosch-ebike-connect-classic -p 127.0.0.1:8080:8080 -v ebike-data:/data \
-  --env-file .env --read-only --tmpfs /tmp --cap-drop ALL ghcr.io/<owner>/<repo>:1.0.0
+mkdir -p config                       # persistent data (or set DATA_PATH in .env)
+cp .env.example .env                  # set GATEWAY_SECRET and PUBLIC_URL; set PUID/PGID if not 1000
+docker compose pull && docker compose up -d
 ```
+
+Update to a new version: set `IMAGE_TAG` (or leave `latest`) and run `docker compose pull && docker
+compose up -d`. The data in `./config` is kept.
+
+**Plain `docker run`**, with the data in `./config` (change the left side of `-v` for another folder):
+
+```bash
+mkdir -p config
+docker run -d --name bosch-ebike-connect-classic --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 \
+  --user "$(id -u):$(id -g)" -v "$PWD/config:/data" \
+  -e GATEWAY_SECRET="$(openssl rand -base64 48)" -e PUBLIC_URL=http://localhost:8080 \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
+  ghcr.io/edocsyl/bosch-ebike-connect-classic:1.0.0
+```
+
+Keep the generated `GATEWAY_SECRET` (put it in an env file and pass `--env-file` instead): a new
+secret makes the stored sessions unreadable. Without `--user` the image runs as uid 10001, so the
+mounted folder must then be owned by `10001:10001` (`sudo chown 10001:10001 config`).
+
+Replace `edocsyl/bosch-ebike-connect-classic` with your own `<owner>/<repo>` if you fork the project.
 
 No secrets are needed in GitHub: publishing uses the built-in `GITHUB_TOKEN`.
 
@@ -206,7 +255,7 @@ touches only the calling user's data. The success page after sign-in repeats the
    db.commit()"
    ```
 
-3. *Server side, everything:* `docker compose down -v` deletes all users' sessions.
+3. *Server side, everything:* stop the container and delete the data folder (`docker compose down && rm -rf config`) to remove all users' sessions.
 
 Expired tokens are purged hourly; a Bosch session stays stored until it is deleted as above.
 
