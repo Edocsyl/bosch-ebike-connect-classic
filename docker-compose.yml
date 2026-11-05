@@ -1,22 +1,17 @@
 services:
   bosch-ebike-connect-classic:
-    # Published image (GitHub Container Registry). `docker compose up -d --build` builds it locally instead.
-    image: ${IMAGE:-ghcr.io/edocsyl/bosch-ebike-connect-classic}:${IMAGE_TAG:-1.0.0}
-    build: .
-    container_name: bosch-ebike-connect-classic
-    env_file: .env
-    environment:
-      - DATA_DIR=/data
-    # Run as the owner of the data folder so the bind mount is writable (see PUID / PGID in .env.example).
-    user: "${PUID:-1000}:${PGID:-1000}"
+    image: ghcr.io/edocsyl/bosch-ebike-connect-classic:1.1.0
+    build: .                        # `docker compose up -d --build` builds it locally instead
+    user: "1000:1000"               # owner of ./config (run `id -u` / `id -g`)
     ports:
-      - "127.0.0.1:8080:8080"   # TLS reverse proxy / Cloudflare Tunnel in front
+      - "127.0.0.1:8080:8080"
+    environment:
+      PUBLIC_URL: http://localhost:8080     # address your clients use (https://... when public)
+      # TRUST_PROXY: "1"                    # behind Cloudflare / a reverse proxy
+      # GATEWAY_SECRET: ...                 # optional: else generated into ./config/gateway.secret
     volumes:
-      # Persistent data (SQLite with encrypted sessions and OAuth state): ./config by default,
-      # change it with DATA_PATH in .env
-      - ${DATA_PATH:-./config}:/data
+      - ./config:/data              # everything the server keeps: database + secret
     restart: unless-stopped
     read_only: true
-    tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

@@ -383,3 +383,18 @@ def test_success_page_explains_logout_and_generic_client_support(client):
                     headers={"Content-Type": "application/x-www-form-urlencoded",
                              "Authorization": "Basic " + b64.b64encode(f"{cid}:".encode()).decode()})
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+
+
+def test_config_generates_and_reuses_secret_in_data_dir(tmp_path, monkeypatch):
+    for k in ("GATEWAY_SECRET", "PUBLIC_URL", "PORT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "cfg"))
+    first = Config.from_env()
+    assert len(first.secret) >= 32 and first.public_url == "http://localhost:8080"
+    f = tmp_path / "cfg" / "gateway.secret"
+    assert f.exists() and (f.stat().st_mode & 0o777) == 0o600
+    assert Config.from_env().secret == first.secret            # stable across restarts
+    monkeypatch.setenv("GATEWAY_SECRET", "e" * 40)
+    monkeypatch.setenv("PUBLIC_URL", "https://x.example/")
+    c = Config.from_env()
+    assert c.secret == "e" * 40 and c.public_url == "https://x.example"   # env wins

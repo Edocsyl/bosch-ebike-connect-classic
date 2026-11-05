@@ -61,9 +61,8 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke test (health check, /mcp without token answers 401, OAuth metadata)
         run: |
-          docker run -d --name smoke -p 8080:8080 \
-            -e GATEWAY_SECRET="$(openssl rand -base64 48)" \
-            -e PUBLIC_URL=http://localhost:8080 smoke:test
+          # no environment at all: secret is generated, PUBLIC_URL defaults to localhost
+          docker run -d --name smoke -p 8080:8080 smoke:test
           for i in $(seq 1 20); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
           test "$(curl -fsS http://localhost:8080/healthz)" = "ok"
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/mcp)" = "401"
