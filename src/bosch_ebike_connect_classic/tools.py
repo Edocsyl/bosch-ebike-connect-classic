@@ -15,7 +15,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
+import sys
+import time
+
 from .client import AuthRequired, BoschClient, EBikeError
+from .logutil import log, mask_email
 from .store import Store
 
 current_account: ContextVar[str | None] = ContextVar("current_account", default=None)
@@ -48,6 +52,8 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
                   stateless_http=True, json_response=True)
 
     async def run(fn) -> CallToolResult:
+        tool = sys._getframe(1).f_code.co_name      # the calling tool function
+        started = time.monotonic()
         key = current_account.get()
         if not key:
             return _res(EXPIRED)
@@ -57,15 +63,20 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
         client = BoschClient(acc["remember"], on_rotate=lambda t: store.update_remember(key, t))
         try:
             result = await fn(client)
+            log.debug("tool %s ok for %s (%d ms)", tool, mask_email(key), (time.monotonic() - started) * 1000)
             return _res(result if isinstance(result, str) else _dump(result))
         except AuthRequired:
             # Drop our tokens: the next MCP call gets a 401 challenge and the
             # client re-runs the OAuth sign-in by itself.
+            log.warning("tool %s: eBike Connect session expired for %s, tokens revoked", tool, mask_email(key))
             store.revoke_tokens(key)
             return _res(EXPIRED)
         except EBikeError as e:
+            log.info("tool %s: portal error for %s: %s", tool, mask_email(key), e)
             return _res(f"Error: {e}")
         except Exception as e:  # network errors etc.
+            log.error("tool %s failed for %s: %s", tool, mask_email(key), type(e).__name__,
+                      exc_info=log.isEnabledFor(10))
             return _res(f"Error: {type(e).__name__}: {e}")
 
     @mcp.tool()
@@ -292,6 +303,7 @@ def create_mcp(store: Store, host: str = "0.0.0.0", port: int = 8080) -> FastMCP
             except Exception as e:  # network/portal error: still delete our copy
                 portal = f"portal sign-out failed ({type(e).__name__}); the session may stay valid there"
         store.delete_account(key)
+        log.info("disconnect_account: %s removed (%s)", mask_email(key), portal)
         return _res(f"Disconnected. {portal.capitalize()}. Stored session and tokens deleted; reconnect to use the tools again.")
 
     return mcp

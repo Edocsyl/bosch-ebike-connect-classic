@@ -29,6 +29,7 @@ src/bosch_ebike_connect_classic/
   config.py     Environment -> Config; generates gateway.secret in the data dir if unset
   pages.py      HTML pages (sign-in, success, message, landing); English only, no JavaScript
   ratelimit.py  Sliding-window limiter
+  logutil.py    Logger (`ebike`), level parsing, `mask_email`, `setup_logging`
 tests/test_flow.py   Whole OAuth flow + tools against a fake Bosch (respx)
 Dockerfile, docker-compose.yml, .github/workflows/{ci,release}.yml
 ```
@@ -37,7 +38,7 @@ Dockerfile, docker-compose.yml, .github/workflows/{ci,release}.yml
 
 ```bash
 pip install -e ".[dev]"      # install with test dependencies
-pytest -q                    # 18 tests, no network, no real Bosch account
+pytest -q                    # 20 tests, no network, no real Bosch account
 docker compose up -d --build # build and run locally (data in ./config, port 127.0.0.1:8080)
 docker compose logs -f
 ```
@@ -109,15 +110,32 @@ deliberate migration, not a bump.
 
 ## Testing
 
-- `pytest -q` runs `tests/test_flow.py` (18 tests): OAuth flow and user isolation, 401 challenge, wrong
+- `pytest -q` runs `tests/test_flow.py` (20 tests): OAuth flow and user isolation, 401 challenge, wrong
   password, single-use code and PKCE, redirect / CSRF rejection, expired-session re-authorisation, refresh and
   cookie rotation, export time zones, read tools against mocked endpoints, `disconnect_account`, encryption at
-  rest, Origin / resource / `iss` / `isError`, sign-in and success pages, config secret generation.
+  rest, Origin / resource / `iss` / `isError`, sign-in and success pages, config secret generation, log levels
+  and absence of secrets in logs.
 - The Bosch portal is mocked with `respx`; tests never touch the network. Helpers: `connect()` runs the whole
   sign-in and returns tokens, `call_tool()` posts a JSON-RPC `tools/call`, `tool_text()` extracts the text.
 - Live checks against a real account are manual (see Commands) and use the browser sign-in; never script the
   password. Check the live behaviour of any new endpoint once and record quirks below.
 - The Docker image is smoke-tested in CI: `/healthz`, `/mcp` without token → 401, OAuth metadata.
+
+## Logging
+
+Use the `ebike` logger from `logutil.py` (`from .logutil import log, mask_email`); output goes to stdout
+and is configured once in `main()` from `LOG_LEVEL`. uvicorn's access log is on only at `DEBUG`.
+
+| Level | What belongs there |
+|---|---|
+| ERROR | unexpected failures (tool crash, portal unreachable during sign-in); stack trace only at DEBUG |
+| WARNING | security-relevant or abnormal events: rejected sign-in, rate limit, foreign origin, invalid grant, expired Bosch session |
+| INFO | lifecycle and account events: start-up, sign-in, client registration, disconnect, portal errors returned to the user |
+| DEBUG | per-request detail: tool calls, portal requests (method, path, status, ms), token requests, 401 challenges |
+
+Never log passwords, access / refresh tokens, codes, the `REMEMBER` cookie, `GATEWAY_SECRET`, request bodies or
+full e-mail addresses (use `mask_email`). `test_logging_levels_and_no_secrets_in_logs` enforces this; extend it
+when you add log lines near credentials.
 
 ## Conventions
 
@@ -150,6 +168,7 @@ deliberate migration, not a bump.
 | `PUBLIC_URL` | `http://localhost:<PORT>` | OAuth issuer; no trailing slash |
 | `DATA_DIR` | `/data` | SQLite and secret (mounted from `./config` by Compose) |
 | `TRUST_PROXY` | `0` | `1`: rate limits use `CF-Connecting-IP` / `X-Forwarded-For` |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` (case-insensitive; `WARN` accepted) |
 | `ALLOWED_ORIGINS` | empty | extra browser origins for `/mcp` |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | |
 
@@ -240,6 +259,7 @@ Quirks:
 | Every client asks to sign in again | `gateway.secret` / `GATEWAY_SECRET` changed or `./config` was deleted: stored sessions are unreadable |
 | `401` on `/mcp` right after sign-in | `PUBLIC_URL` does not match the address the client uses (issuer mismatch) |
 | `403 forbidden_origin` | browser-based client: add its origin to `ALLOWED_ORIGINS` |
+| Need more detail | set `LOG_LEVEL=debug` and read `docker compose logs -f` |
 | Tool answers "session expired" | the Bosch session ended; the client re-authorises on the next call |
 | Tool answers `HTTP 400` | portal rejects the parameters (unknown ID, non-integer filter, missing `timezone`); see quirks |
 | Image pull is denied | package is private: `docker login ghcr.io` with a `read:packages` token or make it public |

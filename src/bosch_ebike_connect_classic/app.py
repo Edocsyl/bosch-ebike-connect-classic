@@ -20,6 +20,7 @@ from starlette.routing import Mount, Route
 from . import pages
 from .client import AuthRequired, EBikeError, login
 from .config import Config
+from .logutil import log, mask_email
 from .ratelimit import RateLimiter
 from .store import Store, normalize_account_key
 from .tools import create_mcp, current_account
@@ -149,14 +150,17 @@ class McpGuard:
         hdrs = dict(scope["headers"])
         origin = hdrs.get(b"origin", b"").decode("latin-1")
         if origin and not self._origin_ok(origin):
+            log.warning("mcp: rejected foreign origin %s", origin[:100])
             return await self._deny(send, 403, None, b'{"error":"forbidden_origin"}')
         auth = hdrs.get(b"authorization", b"").decode("latin-1")
         token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
         account = self.store.lookup_access(token) if token else None
         if not account:
+            log.debug("mcp: no or invalid bearer token -> 401 challenge")
             www = f'Bearer resource_metadata="{self.metadata_url}"'
             return await self._deny(send, 401, www, b'{"error":"invalid_token"}')
         if not self.limiter.hit(account):
+            log.warning("mcp: rate limit exceeded for account %s", mask_email(account))
             return await self._deny(send, 429, None, b'{"error":"rate_limited"}')
         ctx = current_account.set(account)
         try:
@@ -215,6 +219,7 @@ def build_app(config: Config) -> Starlette:
     # --- dynamic client registration (RFC 7591) -----------------------------------------
     async def register(request: Request) -> Response:
         if not register_ip.hit(client_ip(request)):
+            log.warning("oauth: registration rate limit exceeded (ip %s)", client_ip(request))
             return _json({"error": "rate_limited"}, 429)
         try:
             body = await request.json()
@@ -222,9 +227,11 @@ def build_app(config: Config) -> Starlette:
             assert isinstance(uris, list) and 1 <= len(uris) <= 10
             assert all(isinstance(u, str) and valid_redirect_uri(u) for u in uris)
         except Exception:
+            log.warning("oauth: registration rejected (invalid redirect uris)")
             return _json({"error": "invalid_redirect_uri"}, 400)
         name = str(body.get("client_name") or "")[:100]
         cid = store.create_client(name, uris)
+        log.info("oauth: registered client '%s' (%d redirect uri)", name or "-", len(uris))
         return _json({"client_id": cid, "client_id_issued_at": int(time.time()), "client_name": name, "redirect_uris": uris,
                       "token_endpoint_auth_method": "none",
                       "grant_types": ["authorization_code", "refresh_token"],
@@ -254,6 +261,7 @@ def build_app(config: Config) -> Starlette:
             client, err = check_authorize_params(params)
             if not client:
                 return _html(pages.message_page(pages.T[lang_of(request)]["msg_invalid"], err, lang_of(request)), 400)
+            log.debug("oauth: sign-in page for client '%s'", client["name"])
             csrf = secrets.token_urlsafe(24)
             resp = _html(pages.authorize_page(client_name=client["name"], params=params, csrf=csrf, lang=lang_of(request)))
             resp.set_cookie("csrf", csrf, httponly=True, samesite="strict",
@@ -269,6 +277,7 @@ def build_app(config: Config) -> Starlette:
 
         csrf_cookie = request.cookies.get("csrf", "")
         if not csrf_cookie or not hmac.compare_digest(csrf_cookie, form.get("csrf", "")):
+            log.warning("oauth: sign-in rejected (csrf mismatch)")
             tl = pages.T[lang_of(request)]
             return _html(pages.message_page(tl["msg_expired"], tl["msg_expired_t"], lang_of(request)), 400)
 
@@ -287,18 +296,22 @@ def build_app(config: Config) -> Starlette:
             return again(tt["e_fields"])
         key = normalize_account_key(email)
         if not login_ip.hit(client_ip(request)) or not login_acct.hit(key):
+            log.warning("oauth: sign-in rate limit exceeded (ip %s, account %s)", client_ip(request), mask_email(key))
             return again(tt["e_many"], 429)
 
         try:
             remember = await asyncio.wait_for(login(email, password), timeout=30)
         except AuthRequired:
+            log.warning("oauth: sign-in rejected by eBike Connect (account %s)", mask_email(key))
             return again(tt["e_bad"])
-        except (EBikeError, asyncio.TimeoutError, OSError):
+        except (EBikeError, asyncio.TimeoutError, OSError) as e:
+            log.error("oauth: eBike Connect not reachable during sign-in: %s", type(e).__name__)
             return again(tt["e_down"], 502)
         finally:
             del password
 
         store.upsert_account(key, {"username": email, "remember": remember})
+        log.info("oauth: signed in %s via '%s'", mask_email(key), client["name"] or "-")
         code = store.put_code(client["client_id"], key, params["redirect_uri"],
                               params["code_challenge"])
         target = add_query(params["redirect_uri"], code=code, state=params["state"], iss=issuer)
@@ -310,6 +323,7 @@ def build_app(config: Config) -> Starlette:
     # --- token endpoint --------------------------------------------------------------------
     async def token(request: Request) -> Response:
         if not token_ip.hit(client_ip(request)):
+            log.warning("oauth: token rate limit exceeded (ip %s)", client_ip(request))
             return _json({"error": "rate_limited"}, 429)
         raw = (await request.body())[:8192].decode("utf-8", "replace")
         if "json" in request.headers.get("content-type", ""):
@@ -336,12 +350,18 @@ def build_app(config: Config) -> Starlette:
             if (not row or row["client_id"] != client_id
                     or row["redirect_uri"] != form.get("redirect_uri")
                     or not pkce_ok(form.get("code_verifier", ""), row["challenge"])):
+                log.warning("oauth: invalid authorization_code grant")
                 return _json({"error": "invalid_grant"}, 400)
+            log.debug("oauth: tokens issued (authorization_code) for %s", mask_email(row["account_key"]))
             return _json(store.issue_tokens(client_id, row["account_key"]))
 
         if grant == "refresh_token":
             tokens = store.rotate_refresh(form.get("refresh_token", ""), client_id)
-            return _json(tokens) if tokens else _json({"error": "invalid_grant"}, 400)
+            if not tokens:
+                log.warning("oauth: invalid or reused refresh token")
+                return _json({"error": "invalid_grant"}, 400)
+            log.debug("oauth: tokens refreshed")
+            return _json(tokens)
 
         return _json({"error": "unsupported_grant_type"}, 400)
 
@@ -359,6 +379,13 @@ def build_app(config: Config) -> Starlette:
                 await asyncio.sleep(3600)
 
         task = asyncio.create_task(reaper())
+        try:
+            from importlib.metadata import version
+            ver = version("bosch-ebike-connect-classic")
+        except Exception:
+            ver = "?"
+        log.info("starting bosch-ebike-connect-classic %s: public_url=%s data_dir=%s log_level=%s trust_proxy=%s",
+                 ver, config.public_url, config.data_dir, config.log_level, config.trust_proxy)
         try:
             async with mcp_app.router.lifespan_context(mcp_app):
                 yield

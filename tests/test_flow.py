@@ -398,3 +398,36 @@ def test_config_generates_and_reuses_secret_in_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLIC_URL", "https://x.example/")
     c = Config.from_env()
     assert c.secret == "e" * 40 and c.public_url == "https://x.example"   # env wins
+
+
+def test_log_level_parsing_and_masking(monkeypatch):
+    from bosch_ebike_connect_classic.logutil import mask_email, parse_level
+    assert parse_level("debug") == "DEBUG" and parse_level("warn") == "WARNING" and parse_level("") == "INFO"
+    with pytest.raises(SystemExit):
+        parse_level("loud")
+    assert mask_email("alice@example.com") == "a***@e***.com" and mask_email("junk") == "***"
+    monkeypatch.setenv("LOG_LEVEL", "error")
+    monkeypatch.setenv("GATEWAY_SECRET", "s" * 40)
+    assert Config.from_env().log_level == "ERROR"
+
+
+@respx.mock
+def test_logging_levels_and_no_secrets_in_logs(client, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG, logger="ebike")
+    cid = register(client)
+    bosch_login_ok("cookie-SECRETVALUE")
+    tokens, _ = connect(client, cid, "alice@example.com", password="hunter2-PASSWORD")
+    respx.get(f"{API}/portal/devices/my_ebikes").mock(return_value=httpx.Response(200, json={"my_ebikes": []}))
+    call_tool(client, tokens["access_token"], "get_my_ebikes")
+    text = "\n".join(f"{r.levelname} {r.getMessage()}" for r in caplog.records)
+    assert "INFO oauth: signed in a***@e***.com" in text
+    assert "DEBUG tool get_my_ebikes ok" in text and "DEBUG portal GET portal/devices/my_ebikes -> 200" in text
+    for secret in ("hunter2-PASSWORD", "cookie-SECRETVALUE", tokens["access_token"], tokens["refresh_token"],
+                   "alice@example.com"):
+        assert secret not in text
+    # a rejected sign-in is a WARNING
+    caplog.clear()
+    respx.post(f"{API}/portal/login/public").mock(return_value=httpx.Response(401, json={}))
+    connect(client, cid, "bob@example.com", password="x", expect_ok=False)
+    assert any(r.levelname == "WARNING" and "rejected by eBike Connect" in r.getMessage() for r in caplog.records)

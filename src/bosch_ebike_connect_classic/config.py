@@ -5,6 +5,8 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from .logutil import parse_level
+
 
 @dataclass(frozen=True)
 class Config:
@@ -14,6 +16,7 @@ class Config:
     host: str = "0.0.0.0"
     port: int = 8080
     trust_proxy: bool = False   # honour CF-Connecting-IP / X-Forwarded-For for rate limits
+    log_level: str = "INFO"      # LOG_LEVEL: DEBUG | INFO | WARNING | ERROR
     allowed_origins: tuple[str, ...] = ()   # extra browser origins for /mcp (browser-based MCP clients)
 
     @property
@@ -41,6 +44,7 @@ class Config:
             data_dir=data_dir,
             host=os.environ.get("HOST", "0.0.0.0"),
             port=port,
+            log_level=parse_level(os.environ.get("LOG_LEVEL", "INFO")),
             trust_proxy=os.environ.get("TRUST_PROXY", "") in ("1", "true", "yes"),
             allowed_origins=tuple(o.strip().rstrip("/") for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()),
         )

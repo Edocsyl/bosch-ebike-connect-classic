@@ -8,6 +8,7 @@ services:
     environment:
       PUBLIC_URL: http://localhost:8080     # address your clients use (https://... when public)
       # TRUST_PROXY: "1"                    # behind Cloudflare / a reverse proxy
+      # LOG_LEVEL: info                     # debug | info | warning | error
       # GATEWAY_SECRET: ...                 # optional: else generated into ./config/gateway.secret
     volumes:
       - ./config:/data              # everything the server keeps: database + secret

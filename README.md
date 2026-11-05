@@ -27,6 +27,7 @@ services:
     environment:
       PUBLIC_URL: http://localhost:8080     # address your clients use (https://... when public)
       # TRUST_PROXY: "1"                    # behind Cloudflare / a reverse proxy
+      # LOG_LEVEL: info                     # debug | info | warning | error
       # GATEWAY_SECRET: ...                 # optional: else generated into ./config/gateway.secret
     volumes:
       - ./config:/data              # everything the server keeps: database + secret
@@ -80,7 +81,19 @@ Everything is set in the `environment:` block of the compose file:
 | `PUBLIC_URL` | `http://localhost:8080` | Address your clients use, no trailing slash. Use your https address when public. |
 | `GATEWAY_SECRET` | generated | ≥ 32 characters. If unset, one is generated on first start and kept in `./config/gateway.secret`. |
 | `TRUST_PROXY` | `0` | `"1"` behind Cloudflare or another trusted proxy (rate limits use the real client IP). |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error`; see "Logs" below. |
 | `ALLOWED_ORIGINS` | empty | Extra browser origins allowed to call `/mcp` (browser-based clients only). |
+
+**Logs:** `docker compose logs -f`. `LOG_LEVEL` decides how much is written:
+
+| Level | Logs |
+|---|---|
+| `error` | only failures that need attention (unexpected errors) |
+| `warning` | plus rejected sign-ins, rate limits, foreign origins, expired Bosch sessions, invalid tokens |
+| `info` (default) | plus start-up, sign-ins, registered clients, disconnects, portal errors |
+| `debug` | plus every tool call, every request to the portal (path, status, duration), token requests, HTTP access log |
+
+Logs never contain passwords, tokens, cookies or the full e-mail address (shown as `a***@e***.com`).
 
 **Data:** the `./config` folder holds everything the server keeps: `gateway.sqlite3` (encrypted Bosch
 sessions, OAuth clients, tokens) and `gateway.secret`. Back it up as a whole. Create it yourself before the

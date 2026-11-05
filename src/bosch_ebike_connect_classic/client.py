@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 import httpx
 
+from .logutil import log
+
 BASE = "https://www.ebike-connect.com"
 API = f"{BASE}/ebikeconnect/api"
 COOKIE = "REMEMBER"
@@ -76,12 +78,14 @@ class BoschClient:
 
     async def request(self, path: str, *, params: "dict[str, Any] | list[tuple[str, Any]] | None" = None,
                       raw: bool = False, method: str = "GET"):
+        started = time.monotonic()
         items = params.items() if isinstance(params, dict) else (params or [])
         query = [(k, v) for k, v in items if v is not None]
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False,
                                      cookies={COOKIE: self.remember}) as http:
             resp = await http.request(method, f"{API}/{path.lstrip('/')}", params=query,
                                       headers=HEADERS, json={} if method == "POST" else None)
+        log.debug("portal %s %s -> %d (%d ms)", method, path, resp.status_code, (time.monotonic() - started) * 1000)
         rotated = resp.cookies.get(COOKIE)
         if rotated and rotated != self.remember:
             self.remember = rotated
